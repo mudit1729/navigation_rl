@@ -1,0 +1,175 @@
+env:
+  size: 20
+  hard_size: 30
+  view_radius: 4
+  wall_density: 0.15
+  mine_density: 0.12
+  max_health: 3
+  max_steps: 500
+  max_steps_factor: 5
+  generation_max_attempts: 10
+  revisit_window: 10
+  seed: 12345
+  scenario_name: baseline
+  scenario_label: 20x20 Baseline
+  reward:
+    clip: [-2.0, 2.0]
+    revisit_penalty: 0.03
+    loop_penalty: 0.08
+    oscillation_penalty: 0.12
+
+scenarios:
+  easy:
+    size: 30
+    wall_density: 0.13
+    mine_density: 0.08
+    max_steps: 900
+    generation_max_attempts: 12
+    revisit_window: 12
+    scenario_name: easy
+    scenario_label: 30x30 Easy
+  medium:
+    size: 50
+    wall_density: 0.16
+    mine_density: 0.11
+    max_steps: 1800
+    generation_max_attempts: 14
+    revisit_window: 14
+    scenario_name: medium
+    scenario_label: 50x50 Medium
+  hard:
+    size: 100
+    wall_density: 0.19
+    mine_density: 0.14
+    max_steps: 4200
+    generation_max_attempts: 18
+    revisit_window: 18
+    scenario_name: hard
+    scenario_label: 100x100 Hard
+
+model:
+  obs_channels: 2
+  obs_size: 9
+  cnn_channels: [16, 32, 32]
+  feature_dim: 256
+  hidden_dim: 256
+  post_health_dim: 128
+  gru_layers: 1
+  action_dim: 8
+
+drqn:
+  train_steps: 500000
+  warmup_steps: 5000
+  batch_size: 32
+  sequence_length: 16
+  replay_capacity: 5000
+  gamma: 0.99
+  lr: 0.0005
+  grad_clip_norm: 10.0
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay_steps: 300000
+  target_update_interval: 500
+  train_interval: 1
+  log_interval_episodes: 10
+  checkpoint_interval_steps: 10000
+  value_aux_weight: 0.0
+
+ppo:
+  total_timesteps: 300000
+  num_envs: 8
+  rollout_steps: 128
+  sequence_length: 32
+  update_epochs: 4
+  num_minibatches: 4
+  gamma: 0.99
+  gae_lambda: 0.95
+  learning_rate: 0.00025
+  clip_coef: 0.2
+  entropy_coef: 0.01
+  value_coef: 0.5
+  grad_clip_norm: 0.5
+  normalize_advantages: true
+  checkpoint_interval_updates: 25
+
+grpo:
+  total_updates: 8
+  groups_per_update: 2
+  group_rollouts: 4
+  epochs_per_update: 2
+  batch_size: 4
+  learning_rate: 0.0001
+  clip_coef: 0.2
+  entropy_coef: 0.003
+  kl_coef: 0.02
+  policy_target_coef: 0.25
+  grad_clip_norm: 0.5
+  checkpoint_interval_updates: 2
+  mcts_simulations: 4
+  normalize_group_advantages: true
+
+imitation:
+  demo_episodes: 1500
+  epochs: 8
+  batch_size: 16
+  learning_rate: 0.0003
+  value_coef: 0.25
+  grad_clip_norm: 0.5
+  checkpoint_interval_epochs: 1
+  expert_mine_cost: 6.0
+
+mcts:
+  train_episodes: 100
+  simulations_train: 20
+  simulations_eval: 50
+  max_depth: 10
+  c_puct: 1.25
+  dirichlet_alpha: 0.3
+  dirichlet_epsilon: 0.25
+  policy_temperature: 1.0
+  gamma: 0.99
+  lr: 0.0003
+  batch_size: 16
+  sequence_length: 16
+  replay_capacity: 4000
+  warmup_episodes: 5
+  grad_clip_norm: 10.0
+  weight_decay: 0.0001
+  checkpoint_interval_episodes: 25
+
+eval:
+  episodes: 50
+
+curriculum:
+  easy:
+    run_imitation: true
+    grpo_updates: 8
+    mcts_simulations: 4
+    max_episode_steps: 250
+    render_attempts: 4
+    render_sample_every: 5
+  medium:
+    run_imitation: false
+    grpo_updates: 6
+    mcts_simulations: 4
+    max_episode_steps: 320
+    render_attempts: 4
+    render_sample_every: 8
+  hard:
+    run_imitation: false
+    grpo_updates: 4
+    mcts_simulations: 4
+    max_episode_steps: 420
+    render_attempts: 3
+    render_sample_every: 16
+
+viz:
+  fps: 30
+  auto_reset_delay_ms: 1000
+  window_width: 1200
+  window_height: 820
+  reward_history: 200
+  speed_modes:
+    "1x": 220
+    "5x": 40
+    "MAX": 0

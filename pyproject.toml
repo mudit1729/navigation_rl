@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minefield-navigator-rl"
+version = "0.1.0"
+description = "Procedural partially observable minefield navigation with imitation learning, recurrent PPO, and PPO-compatible MCTS-guided GRPO."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Mudit J" }
+]
+keywords = ["reinforcement-learning", "ppo", "mcts", "gymnasium", "pygame", "navigation"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "torch",
+  "gymnasium",
+  "numpy",
+  "pygame",
+  "matplotlib",
+  "pyyaml",
+  "tqdm",
+  "tensorboard",
+]
+
+[project.urls]
+Homepage = "https://github.com/mudit1729/navigation_rl"
+Repository = "https://github.com/mudit1729/navigation_rl"
+
+[project.scripts]
+minefield-rl = "minefield_rl.main:main"
+
+[tool.setuptools.packages.find]
+include = ["minefield_rl*"]
+
+[tool.setuptools.package-data]
+minefield_rl = ["configs/*.yaml"]

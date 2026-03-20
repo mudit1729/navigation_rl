@@ -1,0 +1,8 @@
+torch
+gymnasium
+numpy
+pygame
+matplotlib
+pyyaml
+tqdm
+tensorboard
