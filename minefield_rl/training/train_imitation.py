@@ -146,6 +146,7 @@ def train_imitation(
     map_size: int | None = None,
     checkpoint_dir: str | Path | None = None,
     log_dir: str | Path | None = None,
+    initial_checkpoint: str | Path | None = None,
 ) -> dict[str, Any]:
     il_cfg = config["imitation"]
     local_config = dict(config)
@@ -168,6 +169,9 @@ def train_imitation(
         raise RuntimeError("No expert demonstrations were collected")
 
     model = RecurrentPPOActorCritic(local_config).to(device)
+    if initial_checkpoint is not None:
+        ckpt = torch.load(str(initial_checkpoint), map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
     optimizer = Adam(model.parameters(), lr=float(il_cfg["learning_rate"]), eps=1e-5)
     batch_size = int(il_cfg["batch_size"])
     epochs = int(il_cfg["epochs"])

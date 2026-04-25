@@ -6,7 +6,12 @@ The environment is Gymnasium-compatible and fully procedural per episode. Each g
 
 ## Demo
 
-The repository includes three tracked GIFs rendered from trained checkpoints:
+### Progressive curriculum: 9 stages on a 10x10 grid, fog of war
+![Progressive Curriculum](assets/progressive_curriculum.gif)
+
+A single agent learns local-context navigation across nine progressively harder distributions on a 10x10 grid. Each stage adds one nuance — open goal-seeking, mine avoidance, corridor mazes, mined mazes, dense walls, dense mines, then a final mixed generalist trained with PPO + GRPO. Every stage warm-starts from the previous stage's PPO best, so prior skill carries forward.
+
+Final L9 (Generalist + GRPO, 0.30-0.40 wall density mixed with 0.20-0.30 mine density) reaches 92-100% success per profile across L1 through L8. Reproduce with `python tools/run_progressive10.py` followed by `python tools/run_progressive10_extension.py`.
 
 ### Easy: 30x30
 ![30x30 Demo](assets/easy_30x30.gif)
@@ -26,6 +31,7 @@ The repository includes three tracked GIFs rendered from trained checkpoints:
 - Recurrent PPO baseline
 - PPO-compatible MCTS-guided GRPO fine-tuning
 - Curriculum runner for `30x30 -> 50x50 -> 100x100`
+- Progressive 9-stage curriculum on a 10x10 grid that gradually densifies walls and mines and warm-starts each stage from the previous PPO best
 - Pygame renderer with local-view panel plus persistent full-map preview
 - Rollout export to GIF and MP4
 
