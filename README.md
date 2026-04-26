@@ -1,31 +1,32 @@
 # Minefield Navigator RL
 
-Procedural partially-observable navigation: a recurrent agent sees only a 9×9 fog-of-war window, has limited health, must reason around walls and mines, and is trained with a staged pipeline (imitation → recurrent PPO → MCTS-guided GRPO) over a multi-stage curriculum.
+## Problem
 
-The environment is Gymnasium-compatible and fully procedural per episode. Every generated map is BFS-validated so there is always at least one valid path from start to exit.
+A small agent has to cross a procedurally generated 2D minefield from a start cell to an exit cell. The world is hard for three reasons stacked together:
 
-## Headline result: mine = instant death, 20×20 dispersed extreme
+- **Partial observability.** The agent only sees a 9×9 egocentric window. Anything outside that local circle is unknown — including the goal until it gets close. The full map is never an input.
+- **One-hit-kill mines.** The map is salted with mines that are only visible inside the local window. In the headline configuration `max_health = 1`, so a single mine step ends the episode. The agent has to infer "is this cell safe?" from local geometry plus whatever it remembers about cells it just saw.
+- **Procedural and dispersed.** Every episode is a new layout. Walls and mines are sampled uniformly at random across the grid (no corridor structure to lean on). Each map is BFS-validated so a safe path always exists, but it is rarely obvious from the local view.
+
+The combination is what makes the task a real test of local-context reasoning. A reactive policy that just follows a heuristic gradient will eventually walk onto a mine; a memoryless policy will loop in dead ends; a non-recurrent policy will forget the mine it just saw two steps ago. The agent has to do all three jobs at once: navigate, remember, and avoid catastrophe — using only what fits inside a 9×9 patch.
+
+## Solution
+
+A small recurrent actor-critic (CNN encoder → GRU memory → health-conditioned trunk → actor/critic heads) trained in three stacked stages, then walked through a multi-stage curriculum that ends in a mine-is-death fine-tune.
+
+1. **Imitation learning** from an A* expert that plans over `(row, col, health)` with a mine-cost penalty. At `max_health = 1` the planner refuses to step on any mine, so demonstrations are strictly mine-free.
+2. **Recurrent PPO** in the environment, warm-started from the IL checkpoint. This is where the GRU learns to *use* the memory — remembering recently-seen mines, escaping dead ends, calibrating value under partial observability.
+3. **GRPO + MCTS** for the final polish. Short MCTS rollouts produce search-improved action targets in exactly the regime where one local mistake is fatal.
+
+The whole stack is then walked through a curriculum (10×10 clustered → 10×10 dispersed → 20×20 dispersed → mine = instant death). Every stage's PPO/GRPO best feeds the next stage's IL as `initial_checkpoint`, so prior skill carries forward instead of being overwritten. The 9×9 view + small CNN is the structural reason the curriculum works: the input shape never changes when the grid does, so weights transfer cleanly across grid sizes.
+
+## Best result
 
 ![L12 GRPO 20×20 mine=death, every step](assets/l12_grpo_minedeath_20x20_every_step.gif)
 
-The recurrent policy fine-tuned with `max_health = 1`, so a single mine hit terminates the episode. IL warm-starts from the L13 PPO best (20×20 dispersed mixed); PPO then GRPO push the agent to navigate dense walls + mines without ever stepping on one. The clip above shows one full episode at 1 fps, every environment step, on the **L12 dispersed-extreme profile** (0.40 wall density, 0.30 mine density).
-
-The full per-profile scorecard from the same checkpoint, all under mine = instant death:
-
-| Profile | Walls / Mines | Success | Death | Avg health left |
-| --- | --- | --- | --- | --- |
-| L10 dispwalls | 0.40 / 0.20 | 0.68 | 0.24 | 0.76 |
-| L11 dispmines | 0.30 / 0.30 | 0.66 | 0.22 | 0.78 |
-| **L12 dispextreme** | **0.40 / 0.30** | **0.90** | **0.06** | **0.94** |
-| L13 dispopen | 0.20 / 0.20 | 0.48 | 0.46 | 0.54 |
-
-(GRPO best, 50 evaluation episodes per profile.) The strongest profile is the densest one — dense walls funnel safe corridors, while the lower-density L13 profile creates more open junctions where one greedy step can be fatal.
-
-Reproduce the training with `python tools/run_finetune_minedeath.py` (warm-starts from the 20×20 L13 PPO best). Reproduce the headline GIF with `python tools/render_l12_best.py`.
+20×20 dispersed extreme (0.40 wall density, 0.30 mine density), `max_health = 1`. **Success rate 0.90 over 50 evaluation episodes** (death rate 0.06, average remaining health 0.94). One frame per environment step at 1 fps so every move and every mine in view is legible.
 
 ## Architecture
-
-The policy is a small recurrent actor-critic over the local 9×9 view plus a health scalar. The CNN+GRU stack is **grid-size-agnostic** — the same weights run unchanged on 10×10, 20×20, 30×30, etc., because only the egocentric window enters the network.
 
 ```text
                        Observation (per env step)
@@ -37,11 +38,11 @@ The policy is a small recurrent actor-critic over the local 9×9 view plus a hea
                               │
                               ▼
               ┌──────────────────────────────────────────┐
-              │ CNN encoder   (egocentric, no padding-pad)│
-              │   Conv2d(2 → 16, 3×3, pad=1) + ReLU       │
-              │   Conv2d(16→ 32, 3×3, pad=1) + ReLU       │
-              │   Conv2d(32→ 32, 3×3, pad=1) + ReLU       │
-              │   Flatten → Linear(32·9·9 → 256) + ReLU   │
+              │ CNN encoder   (egocentric, 9×9 patch)    │
+              │   Conv2d(2 → 16, 3×3, pad=1) + ReLU      │
+              │   Conv2d(16→ 32, 3×3, pad=1) + ReLU      │
+              │   Conv2d(32→ 32, 3×3, pad=1) + ReLU      │
+              │   Flatten → Linear(32·9·9 → 256) + ReLU  │
               └──────────────────────────────────────────┘
                               │  features (256)
                               ▼
@@ -72,11 +73,7 @@ The policy is a small recurrent actor-critic over the local 9×9 view plus a hea
                   no diagonal corner-cutting
 ```
 
-Reward shaping packs progress, mine penalty, living cost, invalid-move penalty, revisit penalty, loop penalty, and terminal goal/timeout/death rewards. At `max_health = 1` the planner refuses to step on any mine, so demonstrations are strictly mine-free.
-
 ## Training strategy
-
-Three trainers stack on top of each other. Each one consumes the previous stage's checkpoint as `initial_checkpoint`, so prior skill carries forward instead of being overwritten. The curriculum then walks the policy through progressively harder distributions on progressively larger grids, ending with a mine-is-death fine-tune.
 
 ```text
    ┌─────────────────────────────────────────────────────────────────┐
@@ -102,7 +99,7 @@ Three trainers stack on top of each other. Each one consumes the previous stage'
    ┌────┬────┬────┬────┬────┬────┬────┬────┬────┐
    │ L1 │ L2 │ L3 │ L4 │ L5 │ L6 │ L7 │ L8 │ L9 │
    │open│mine│maze│mine│dens│dens│ext │ext │GEN │
-   │    │d-op│    │maze│wall│mine│remel│remm│ +GRPO
+   │    │d-op│    │maze│wall│mine│remel│remm│+GRPO│
    └─┬──┴────┴────┴────┴────┴────┴────┴────┴──┬─┘
      │                                         │
      │  warm-start L9 GRPO  →  scale grid/mode │
@@ -122,8 +119,8 @@ Three trainers stack on top of each other. Each one consumes the previous stage'
                  ▼  warm-start L13 PPO  → max_health 3 → 1
    20×20 dispersed, MINE = INSTANT DEATH        ◀── headline result
    ┌──────────────────────────────────────────┐
-   │ IL  →  PPO  →  GRPO  on mixed dispersed │
-   │ per-profile eval + slow-step rendering  │
+   │ IL  →  PPO  →  GRPO  on mixed dispersed  │
+   │ per-profile eval + slow-step rendering   │
    └──────────────────────────────────────────┘
 ```
 
@@ -133,14 +130,6 @@ Why each piece earns its keep:
 - **PPO** lets the agent discover behaviors the expert can't teach: detours that exploit the GRU memory of recently-seen mines, anti-loop maneuvers in dense walls, and value calibration under partial observability.
 - **GRPO + MCTS** uses short search-improved rollouts as a teacher signal in regions where one local mistake is fatal — exactly the regime mine = instant death lives in.
 - **Curriculum + warm-starts** — every distribution shift (clustered → dispersed, 10×10 → 20×20, health 3 → 1) reuses prior weights instead of starting over. The 9×9 view + small CNN is the structural reason this works: the input shape never changes.
-
-## Environment
-
-- Observation: `(2, 9, 9)` egocentric local window plus a scalar health channel
-- Actions: 8-directional movement, with no diagonal corner cutting
-- Health: configurable; default 3-hit, headline result at 1-hit (mine = death)
-- Rewards: progress shaping, mine penalties, living cost, invalid-move penalties, revisit penalties, loop penalties, terminal rewards
-- Map generation: fully procedural and BFS-validated every episode; supports both `clustered` (cellular-automaton walls + flood-fill mines) and `dispersed` (uniform-random) modes via `episode_profiles`
 
 ## Project layout
 
@@ -154,7 +143,7 @@ minefield_rl/
   viz/         # pygame UI, charts, overlays
   configs/     # base config.yaml
 
-tools/         # orchestrators (curriculum runners, fine-tunes, montage builder)
+tools/         # curriculum orchestrators, fine-tunes, render scripts
 assets/        # demo media tracked in git
 ```
 
@@ -165,45 +154,6 @@ python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -e .
-```
-
-## Quickstart
-
-```bash
-# Evaluate the headline checkpoint
-minefield-rl --mode eval   --agent ppo --checkpoint <path>/ppo_grpo_best.pt --scenario medium --episodes 50
-
-# Watch a rollout
-minefield-rl --mode play   --agent ppo --checkpoint <path>/ppo_grpo_best.pt --scenario medium
-
-# Render to GIF + MP4
-minefield-rl --mode render --agent ppo --checkpoint <path>/ppo_grpo_best.pt --scenario medium \
-             --output-prefix minefield_rl/logs/rollout
-```
-
-## Reproduce the headline result
-
-```bash
-# 1. Progressive curriculum, 10×10 clustered: L1 → L9 (PPO) → L9 GRPO
-python tools/run_progressive10.py
-python tools/run_progressive10_extension.py
-
-# 2. Dispersed mode at 10×10 then 20×20 (warm-starts from L9 GRPO)
-python tools/run_progressive10_dispersed.py
-python tools/run_progressive20_dispersed.py
-
-# 3. Mine = instant death fine-tune (warm-starts from 20×20 L13 PPO)
-python tools/run_finetune_minedeath.py
-
-# 4. Build the slow-step montage from the per-profile renders
-python tools/build_minedeath_montage.py
-```
-
-## Verification
-
-```bash
-python -m compileall minefield_rl
-.venv/bin/python -m minefield_rl --help
 ```
 
 ## License
