@@ -6,6 +6,11 @@ The environment is Gymnasium-compatible and fully procedural per episode. Each g
 
 ## Demo
 
+### Mine = instant death: GRPO best on 20x20 dispersed (every step shown)
+![L13 GRPO 20x20 mine=death](assets/l13_grpo_minedeath_20x20_every_step.gif)
+
+The same recurrent policy fine-tuned at `max_health=1`, so a single mine hit terminates the episode. IL warm-starts from the L13 PPO best (20x20 dispersed), then PPO+GRPO push the agent to navigate every dispersed profile without ever stepping on a mine. One frame per environment step at 1 fps. Per-profile success after GRPO: L10_dispwalls 0.68, L11_dispmines 0.66, L12_dispextreme 0.90, L13_dispopen 0.48 (50 episodes each, full mine death). Reproduce with `python tools/run_finetune_minedeath.py` (warm-starts from the 20x20 L13 PPO best).
+
 ### Progressive curriculum: 9 stages on a 10x10 grid, fog of war
 ![Progressive Curriculum](assets/progressive_curriculum.gif)
 
