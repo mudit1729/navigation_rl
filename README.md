@@ -1,91 +1,162 @@
 # Minefield Navigator RL
 
-Minefield Navigator RL is a procedural navigation project for partially observable grid worlds. The agent sees only a local circular window, has limited health, must reason around walls and mines, and is trained with a staged pipeline that combines imitation learning, recurrent PPO, and PPO-compatible MCTS-guided GRPO fine-tuning.
+Procedural partially-observable navigation: a recurrent agent sees only a 9×9 fog-of-war window, has limited health, must reason around walls and mines, and is trained with a staged pipeline (imitation → recurrent PPO → MCTS-guided GRPO) over a multi-stage curriculum.
 
-The environment is Gymnasium-compatible and fully procedural per episode. Each generated map is BFS-validated so there is always at least one valid path from start to exit.
+The environment is Gymnasium-compatible and fully procedural per episode. Every generated map is BFS-validated so there is always at least one valid path from start to exit.
 
-## Demo
+## Headline result: mine = instant death, 20×20 dispersed
 
-### Mine = instant death: GRPO best on 20x20 dispersed (every step shown)
-![L13 GRPO 20x20 mine=death](assets/l13_grpo_minedeath_20x20_every_step.gif)
+![L13 GRPO 20×20 mine=death, every step](assets/l13_grpo_minedeath_20x20_every_step.gif)
 
-The same recurrent policy fine-tuned at `max_health=1`, so a single mine hit terminates the episode. IL warm-starts from the L13 PPO best (20x20 dispersed), then PPO+GRPO push the agent to navigate every dispersed profile without ever stepping on a mine. One frame per environment step at 1 fps. Per-profile success after GRPO: L10_dispwalls 0.68, L11_dispmines 0.66, L12_dispextreme 0.90, L13_dispopen 0.48 (50 episodes each, full mine death). Reproduce with `python tools/run_finetune_minedeath.py` (warm-starts from the 20x20 L13 PPO best).
+The same recurrent policy fine-tuned with `max_health = 1`, so a single mine hit terminates the episode. IL warm-starts from the L13 PPO best (20×20 dispersed mixed); PPO and GRPO then push the agent to navigate every dispersed profile without ever stepping on a mine. One frame per environment step at 1 fps across all four 20×20 dispersed profiles.
 
-### Progressive curriculum: 9 stages on a 10x10 grid, fog of war
-![Progressive Curriculum](assets/progressive_curriculum.gif)
+| Profile | Walls / Mines | Success | Death | Avg health left |
+| --- | --- | --- | --- | --- |
+| L10 dispwalls | 0.40 / 0.20 | **0.68** | 0.24 | 0.76 |
+| L11 dispmines | 0.30 / 0.30 | **0.66** | 0.22 | 0.78 |
+| L12 dispextreme | 0.40 / 0.30 | **0.90** | 0.06 | 0.94 |
+| L13 dispopen | 0.20 / 0.20 | **0.48** | 0.46 | 0.54 |
 
-A single agent learns local-context navigation across nine progressively harder distributions on a 10x10 grid. Each stage adds one nuance — open goal-seeking, mine avoidance, corridor mazes, mined mazes, dense walls, dense mines, then a final mixed generalist trained with PPO + GRPO. Every stage warm-starts from the previous stage's PPO best, so prior skill carries forward.
+(GRPO best, 50 evaluation episodes per profile, all under mine = instant death.)
 
-Final L9 (Generalist + GRPO, 0.30-0.40 wall density mixed with 0.20-0.30 mine density) reaches 92-100% success per profile across L1 through L8. Reproduce with `python tools/run_progressive10.py` followed by `python tools/run_progressive10_extension.py`.
+Reproduce with `python tools/run_finetune_minedeath.py` — warm-starts from the 20×20 L13 PPO best.
 
-### Dispersed-mode 20x20: every step shown
-![L13 PPO 20x20 every step](assets/l13_ppo_20x20_every_step.gif)
+## Architecture
 
-The same agent, retrained through L10–L13 on a 20x20 grid with the new `dispersion: dispersed` map mode (walls and mines sampled uniformly at random, no cellular-automaton smoothing or flood-fill clustering). The 9x9 view is grid-size-agnostic, so the L9 GRPO weights from 10x10 transfer cleanly. One frame per environment step at 1 fps so you can read the local view between every move. Reproduce with `python tools/run_progressive20_dispersed.py` (warm-starts from the L9 GRPO checkpoint).
+The policy is a small recurrent actor-critic over the local 9×9 view plus a health scalar. The CNN+GRU stack is **grid-size-agnostic** — the same weights run unchanged on 10×10, 20×20, 30×30, etc., because only the egocentric window enters the network.
 
-### Easy: 30x30
-![30x30 Demo](assets/easy_30x30.gif)
+```text
+                       Observation (per env step)
+              ┌──────────────────────────────────────────┐
+              │   obs : (2, 9, 9)        health : (1,)   │
+              │   ch0 = walls/free       in [0, 1]       │
+              │   ch1 = mines (visible)                  │
+              └──────────────────────────────────────────┘
+                              │
+                              ▼
+              ┌──────────────────────────────────────────┐
+              │ CNN encoder   (egocentric, no padding-pad)│
+              │   Conv2d(2 → 16, 3×3, pad=1) + ReLU       │
+              │   Conv2d(16→ 32, 3×3, pad=1) + ReLU       │
+              │   Conv2d(32→ 32, 3×3, pad=1) + ReLU       │
+              │   Flatten → Linear(32·9·9 → 256) + ReLU   │
+              └──────────────────────────────────────────┘
+                              │  features (256)
+                              ▼
+              ┌──────────────────────────────────────────┐
+              │ GRU memory   hidden_size = 256, 1 layer  │
+              │   reset on episode_starts mask           │
+              └──────────────────────────────────────────┘
+                              │  rnn_out (256)
+                              ▼              ┌──────────┐
+                concat ◀──────────────────────│ health(1)│
+                              │              └──────────┘
+                              ▼
+              ┌──────────────────────────────────────────┐
+              │ Post-health trunk                        │
+              │   Linear(257 → 128) + ReLU               │
+              └──────────────────────────────────────────┘
+                    │                              │
+                    ▼                              ▼
+        ┌────────────────────┐         ┌────────────────────┐
+        │ Actor head         │         │ Critic head        │
+        │ Linear(128→64)+ReLU│         │ Linear(128→64)+ReLU│
+        │ Linear(64 → 8)     │         │ Linear(64 → 1)     │
+        │ → action logits    │         │ → state value V(s) │
+        └────────────────────┘         └────────────────────┘
+                    │
+                    ▼
+              8-way move (N, NE, E, SE, S, SW, W, NW)
+                  no diagonal corner-cutting
+```
 
-### Medium: 50x50
-![50x50 Demo](assets/medium_50x50.gif)
+Reward shaping packs progress, mine penalty, living cost, invalid-move penalty, revisit penalty, loop penalty, and terminal goal/timeout/death rewards. At `max_health = 1` the planner refuses to step on any mine, so demonstrations are strictly mine-free.
 
-### Hard: 100x100
-![100x100 Demo](assets/hard_100x100.gif)
+## Training strategy
 
-## Highlights
+Three trainers stack on top of each other. Each one consumes the previous stage's checkpoint as `initial_checkpoint`, so prior skill carries forward instead of being overwritten. The curriculum then walks the policy through progressively harder distributions on progressively larger grids, ending with a mine-is-death fine-tune.
 
-- Procedural map generation with BFS path validation and safe fallback maps
-- Partial-observation environment with fog of war, health, dense shaping, and anti-loop penalties
-- Recurrent policy backbone: CNN encoder plus GRU memory
-- Behavior cloning from an expert shortest-path planner with mine costs
-- Recurrent PPO baseline
-- PPO-compatible MCTS-guided GRPO fine-tuning
-- Curriculum runner for `30x30 -> 50x50 -> 100x100`
-- Progressive 9-stage curriculum on a 10x10 grid that gradually densifies walls and mines and warm-starts each stage from the previous PPO best
-- Dispersed map mode (uniform-random walls and mines) for testing the policy on layouts without corridor or mine-cluster structure
-- Grid-size-agnostic policy: the same 9x9-view weights transfer from 10x10 training to 20x20 evaluation and fine-tuning
-- Pygame renderer with local-view panel plus persistent full-map preview
-- Rollout export to GIF and MP4
+```text
+   ┌─────────────────────────────────────────────────────────────────┐
+   │                       Training pipeline (per stage)             │
+   │                                                                 │
+   │  ┌──────────────────┐   ┌──────────────────┐   ┌──────────────┐ │
+   │  │ 1. Imitation     │   │ 2. Recurrent PPO │   │ 3. GRPO+MCTS │ │
+   │  │ Learning (BC)    │──▶│ on-policy in env │──▶│ search-guided│ │
+   │  │                  │   │                  │   │ policy update│ │
+   │  │ A* expert with   │   │ GAE, clipped     │   │ KL-anchored  │ │
+   │  │ mine-cost plans  │   │ ratio, value MSE │   │ to PPO trunk │ │
+   │  │ → (s,a,return)   │   │ + entropy bonus  │   │ MCTS targets │ │
+   │  │ → BC + value MSE │   │                  │   │ over groups  │ │
+   │  └──────────────────┘   └──────────────────┘   └──────────────┘ │
+   │          │                       │                     │       │
+   │          └────warm-start ────────┼─────warm-start ─────┘       │
+   │           ckpt model_state_dict only (architecture invariant)  │
+   └─────────────────────────────────────────────────────────────────┘
+
+                       Curriculum (each stage = full pipeline above)
+
+   10×10 clustered (CA-smoothed walls + flood-fill mines)
+   ┌────┬────┬────┬────┬────┬────┬────┬────┬────┐
+   │ L1 │ L2 │ L3 │ L4 │ L5 │ L6 │ L7 │ L8 │ L9 │
+   │open│mine│maze│mine│dens│dens│ext │ext │GEN │
+   │    │d-op│    │maze│wall│mine│remel│remm│ +GRPO
+   └─┬──┴────┴────┴────┴────┴────┴────┴────┴──┬─┘
+     │                                         │
+     │  warm-start L9 GRPO  →  scale grid/mode │
+     ▼                                         ▼
+   10×10 dispersed (uniform-random walls/mines, no clustering)
+   ┌────┬────┬────┬────┐
+   │ L10│ L11│ L12│ L13│      same 9×9-view weights, no retraining
+   │d-w │d-m │d-x │mix │      of the CNN/GRU shape needed
+   └────┴────┴────┴────┘
+                 │
+                 ▼  warm-start L13 GRPO  → grid 10 → 20
+   20×20 dispersed
+   ┌────┬────┬────┬────┐
+   │ L10│ L11│ L12│ L13│
+   └────┴────┴────┴────┘
+                 │
+                 ▼  warm-start L13 PPO  → max_health 3 → 1
+   20×20 dispersed, MINE = INSTANT DEATH        ◀── headline result
+   ┌──────────────────────────────────────────┐
+   │ IL  →  PPO  →  GRPO  on mixed dispersed │
+   │ per-profile eval + slow-step rendering  │
+   └──────────────────────────────────────────┘
+```
+
+Why each piece earns its keep:
+
+- **Imitation** boots the policy to a competent prior in minutes; PPO from scratch on the dispersed extreme profile would spend most of its budget on random-walk dying.
+- **PPO** lets the agent discover behaviors the expert can't teach: detours that exploit the GRU memory of recently-seen mines, anti-loop maneuvers in dense walls, and value calibration under partial observability.
+- **GRPO + MCTS** uses short search-improved rollouts as a teacher signal in regions where one local mistake is fatal — exactly the regime mine = instant death lives in.
+- **Curriculum + warm-starts** — every distribution shift (clustered → dispersed, 10×10 → 20×20, health 3 → 1) reuses prior weights instead of starting over. The 9×9 view + small CNN is the structural reason this works: the input shape never changes.
 
 ## Environment
 
-- Observation: `(2, 9, 9)` egocentric local window
+- Observation: `(2, 9, 9)` egocentric local window plus a scalar health channel
 - Actions: 8-directional movement, with no diagonal corner cutting
-- Health: 3-hit survival model over persistent mines
-- Rewards: progress shaping, mine penalties, living cost, invalid move penalties, revisit penalties, loop penalties, and terminal rewards
-- Map generation: fully procedural, BFS-validated every episode
+- Health: configurable; default 3-hit, headline result at 1-hit (mine = death)
+- Rewards: progress shaping, mine penalties, living cost, invalid-move penalties, revisit penalties, loop penalties, terminal rewards
+- Map generation: fully procedural and BFS-validated every episode; supports both `clustered` (cellular-automaton walls + flood-fill mines) and `dispersed` (uniform-random) modes via `episode_profiles`
 
-## Training Pipeline
-
-The intended progression is:
-
-1. `Imitation learning`
-   Learn a reasonable navigation prior from the full-map expert planner.
-2. `Recurrent PPO`
-   Fine-tune the GRU policy directly in the environment.
-3. `GRPO + MCTS`
-   Use search-improved action targets and group-based policy optimization for stronger local decision-making.
-4. `Curriculum`
-   Progress from `easy` (`30x30`) to `medium` (`50x50`) to `hard` (`100x100`).
-
-## Project Layout
+## Project layout
 
 ```text
 minefield_rl/
   env/         # Environment, map generation, fast snapshots
-  models/      # DRQN, RPPO, MCTS
-  planning/    # Expert planner used for imitation learning
-  training/    # PPO, imitation, GRPO, curriculum runner
-  eval/        # Evaluation and rollout rendering
-  viz/         # Pygame UI, charts, overlays
-  configs/     # Training and scenario config
+  models/      # Recurrent PPO actor-critic, MCTS, DRQN
+  planning/    # A* expert with health-aware mine cost
+  training/    # imitation, PPO, GRPO trainers
+  eval/        # batch evaluation and rollout rendering
+  viz/         # pygame UI, charts, overlays
+  configs/     # base config.yaml
 
-assets/        # Curated demo GIFs tracked in git
+tools/         # orchestrators (curriculum runners, fine-tunes, montage builder)
+assets/        # demo media tracked in git
 ```
 
 ## Installation
-
-### Editable install
 
 ```bash
 python -m venv .venv
@@ -94,84 +165,42 @@ pip install --upgrade pip
 pip install -e .
 ```
 
-### Requirements file
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-After installation you can use either `python -m minefield_rl` or the console entry point `minefield-rl`.
-
 ## Quickstart
 
-### Play a checkpoint
-
 ```bash
-minefield-rl --mode play --agent ppo --checkpoint path/to/checkpoint.pt --scenario easy
+# Evaluate the headline checkpoint
+minefield-rl --mode eval   --agent ppo --checkpoint <path>/ppo_grpo_best.pt --scenario medium --episodes 50
+
+# Watch a rollout
+minefield-rl --mode play   --agent ppo --checkpoint <path>/ppo_grpo_best.pt --scenario medium
+
+# Render to GIF + MP4
+minefield-rl --mode render --agent ppo --checkpoint <path>/ppo_grpo_best.pt --scenario medium \
+             --output-prefix minefield_rl/logs/rollout
 ```
 
-### Evaluate a checkpoint
+## Reproduce the headline result
 
 ```bash
-minefield-rl --mode eval --agent ppo --checkpoint path/to/checkpoint.pt --scenario medium --episodes 100
+# 1. Progressive curriculum, 10×10 clustered: L1 → L9 (PPO) → L9 GRPO
+python tools/run_progressive10.py
+python tools/run_progressive10_extension.py
+
+# 2. Dispersed mode at 10×10 then 20×20 (warm-starts from L9 GRPO)
+python tools/run_progressive10_dispersed.py
+python tools/run_progressive20_dispersed.py
+
+# 3. Mine = instant death fine-tune (warm-starts from 20×20 L13 PPO)
+python tools/run_finetune_minedeath.py
+
+# 4. Build the slow-step montage from the per-profile renders
+python tools/build_minedeath_montage.py
 ```
-
-### Run imitation learning
-
-```bash
-minefield-rl --mode train --agent ppo --imitation --scenario easy
-```
-
-### Run recurrent PPO fine-tuning
-
-```bash
-minefield-rl --mode train --agent ppo --checkpoint path/to/checkpoint.pt --scenario easy
-```
-
-### Run GRPO + MCTS fine-tuning
-
-```bash
-minefield-rl --mode train --agent ppo --grpo --checkpoint path/to/checkpoint.pt --scenario easy
-```
-
-### Run the full curriculum
-
-```bash
-minefield-rl --mode curriculum --agent ppo --device cpu --output-prefix minefield_rl/logs/curriculum_run
-```
-
-### Render a rollout to GIF and MP4
-
-```bash
-minefield-rl --mode render --agent ppo --checkpoint path/to/checkpoint.pt --scenario hard --output-prefix minefield_rl/logs/hard_rollout
-```
-
-## Scenario Presets
-
-| Scenario | Grid Size |
-| --- | --- |
-| `easy` | `30x30` |
-| `medium` | `50x50` |
-| `hard` | `100x100` |
-
-You can also override the map size directly with `--map_size`.
-
-## Notes
-
-- The codebase is CPU-oriented and keeps the default networks relatively small.
-- Logs and checkpoints are intentionally excluded from version control.
-- The bundled GIFs are curated artifacts copied from local rollouts.
-- `50x50` and `100x100` remain much harder than `30x30`; the included demos are representative runs, not a claim that the task is solved.
 
 ## Verification
 
-Basic validation used for packaging:
-
 ```bash
-python3 -m compileall minefield_rl
+python -m compileall minefield_rl
 .venv/bin/python -m minefield_rl --help
 ```
 
