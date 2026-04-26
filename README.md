@@ -4,22 +4,24 @@ Procedural partially-observable navigation: a recurrent agent sees only a 9×9 f
 
 The environment is Gymnasium-compatible and fully procedural per episode. Every generated map is BFS-validated so there is always at least one valid path from start to exit.
 
-## Headline result: mine = instant death, 20×20 dispersed
+## Headline result: mine = instant death, 20×20 dispersed extreme
 
-![L13 GRPO 20×20 mine=death, every step](assets/l13_grpo_minedeath_20x20_every_step.gif)
+![L12 GRPO 20×20 mine=death, every step](assets/l12_grpo_minedeath_20x20_every_step.gif)
 
-The same recurrent policy fine-tuned with `max_health = 1`, so a single mine hit terminates the episode. IL warm-starts from the L13 PPO best (20×20 dispersed mixed); PPO and GRPO then push the agent to navigate every dispersed profile without ever stepping on a mine. One frame per environment step at 1 fps across all four 20×20 dispersed profiles.
+The recurrent policy fine-tuned with `max_health = 1`, so a single mine hit terminates the episode. IL warm-starts from the L13 PPO best (20×20 dispersed mixed); PPO then GRPO push the agent to navigate dense walls + mines without ever stepping on one. The clip above shows one full episode at 1 fps, every environment step, on the **L12 dispersed-extreme profile** (0.40 wall density, 0.30 mine density).
+
+The full per-profile scorecard from the same checkpoint, all under mine = instant death:
 
 | Profile | Walls / Mines | Success | Death | Avg health left |
 | --- | --- | --- | --- | --- |
-| L10 dispwalls | 0.40 / 0.20 | **0.68** | 0.24 | 0.76 |
-| L11 dispmines | 0.30 / 0.30 | **0.66** | 0.22 | 0.78 |
-| L12 dispextreme | 0.40 / 0.30 | **0.90** | 0.06 | 0.94 |
-| L13 dispopen | 0.20 / 0.20 | **0.48** | 0.46 | 0.54 |
+| L10 dispwalls | 0.40 / 0.20 | 0.68 | 0.24 | 0.76 |
+| L11 dispmines | 0.30 / 0.30 | 0.66 | 0.22 | 0.78 |
+| **L12 dispextreme** | **0.40 / 0.30** | **0.90** | **0.06** | **0.94** |
+| L13 dispopen | 0.20 / 0.20 | 0.48 | 0.46 | 0.54 |
 
-(GRPO best, 50 evaluation episodes per profile, all under mine = instant death.)
+(GRPO best, 50 evaluation episodes per profile.) The strongest profile is the densest one — dense walls funnel safe corridors, while the lower-density L13 profile creates more open junctions where one greedy step can be fatal.
 
-Reproduce with `python tools/run_finetune_minedeath.py` — warm-starts from the 20×20 L13 PPO best.
+Reproduce the training with `python tools/run_finetune_minedeath.py` (warm-starts from the 20×20 L13 PPO best). Reproduce the headline GIF with `python tools/render_l12_best.py`.
 
 ## Architecture
 
