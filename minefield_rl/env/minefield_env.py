@@ -206,6 +206,7 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
             "wall_density": active_profile["wall_density"],
             "mine_density": active_profile["mine_density"],
             "blocked_fraction_target": active_profile.get("blocked_fraction_target"),
+            "dispersion": active_profile["dispersion"],
             "episode_max_steps": active_profile["max_steps"],
         }
         return self._get_observation(), self._get_info(RewardBreakdown())
@@ -395,6 +396,7 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
             "wall_density": self.info_cache.get("wall_density", self.generator.wall_density),
             "mine_density": self.info_cache.get("mine_density", self.generator.mine_density),
             "blocked_fraction_target": self.info_cache.get("blocked_fraction_target", self.generator.blocked_fraction_target),
+            "dispersion": self.info_cache.get("dispersion", self.generator.dispersion),
             "episode_max_steps": self.info_cache.get("episode_max_steps", self.max_steps),
         }
         self.info_cache.update(info)
@@ -447,6 +449,12 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
             wall_density=float(self.generator.wall_density),
             mine_density=float(self.generator.mine_density),
             generation_max_attempts=int(self.generation_max_attempts),
+            blocked_fraction_target=(
+                None
+                if self.generator.blocked_fraction_target is None
+                else float(self.generator.blocked_fraction_target)
+            ),
+            dispersion=str(self.generator.dispersion),
             trajectory=list(self.trajectory),
             trajectory_counts=np.array(self.trajectory_counts, copy=True),
             outcome=self.outcome,
@@ -474,6 +482,8 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
         self.generator.wall_density = state.wall_density
         self.generator.mine_density = state.mine_density
         self.generator.max_attempts = state.generation_max_attempts
+        self.generator.blocked_fraction_target = state.blocked_fraction_target
+        self.generator.dispersion = state.dispersion
         self.recent_positions = deque(state.recent_positions, maxlen=self.revisit_window)
         self.trajectory = state.trajectory
         self.trajectory_counts = state.trajectory_counts
@@ -493,7 +503,8 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
             max_steps_factor=self.max_steps_factor,
             generation_max_attempts=self.base_generation_max_attempts,
             endpoint_clear_radius=self.base_endpoint_clear_radius,
-            dispersion=self.base_dispersion,
+            blocked_fraction_target=self.generator.blocked_fraction_target,
+            dispersion=self.generator.dispersion,
             revisit_window=self.base_revisit_window,
             reward_clip=self.reward_clip,
             progress_scale=self.progress_scale,

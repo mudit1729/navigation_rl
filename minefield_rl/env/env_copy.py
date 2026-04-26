@@ -21,6 +21,12 @@ class EnvSnapshot:
     total_reward_clipped: float
     mine_hits: int
     recent_positions: list[tuple[int, int]]
+    revisit_window: int
+    wall_density: float
+    mine_density: float
+    generation_max_attempts: int
+    blocked_fraction_target: float | None
+    dispersion: str
     trajectory: list[tuple[int, int]]
     trajectory_counts: np.ndarray
     outcome: str | None
@@ -44,6 +50,16 @@ def clone_snapshot(snapshot: EnvSnapshot) -> EnvSnapshot:
         total_reward_clipped=float(snapshot.total_reward_clipped),
         mine_hits=int(snapshot.mine_hits),
         recent_positions=list(snapshot.recent_positions),
+        revisit_window=int(snapshot.revisit_window),
+        wall_density=float(snapshot.wall_density),
+        mine_density=float(snapshot.mine_density),
+        generation_max_attempts=int(snapshot.generation_max_attempts),
+        blocked_fraction_target=(
+            None
+            if snapshot.blocked_fraction_target is None
+            else float(snapshot.blocked_fraction_target)
+        ),
+        dispersion=str(snapshot.dispersion),
         trajectory=list(snapshot.trajectory),
         trajectory_counts=np.array(snapshot.trajectory_counts, copy=True),
         outcome=snapshot.outcome,
