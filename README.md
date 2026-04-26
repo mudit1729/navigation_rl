@@ -26,6 +26,12 @@ The whole stack is then walked through a curriculum (10×10 clustered → 10×10
 
 20×20 dispersed extreme (0.40 wall density, 0.30 mine density), `max_health = 1`. **Success rate 0.90 over 50 evaluation episodes** (death rate 0.08, average remaining health 0.92). One frame per environment step at 1 fps so every move and every mine in view is legible.
 
+### Scales to 30×30 unchanged
+
+![L12 PPO 30×30 dispextreme, every step](assets/l12_ppo_30x30_every_step.gif)
+
+The same architecture warm-started from the 20×20 GRPO best, fine-tuned at 30×30 on the same dispersed extreme distribution (`max_health = 3`). Per-profile eval matches the smaller grid: **0.90 success on L12 dispextreme (50 ep, 0.10 death)** — even though the cell count quadrupled. The 9×9 fog-of-war view + small CNN means grid scaling is essentially free for the policy as long as the obstacle distribution stays the same. Reproduce with `python tools/run_progressive30_dispersed.py`.
+
 ## Architecture
 
 ```text
