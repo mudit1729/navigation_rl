@@ -20,7 +20,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from minefield_rl.utils import deep_update, ensure_dir
 import tools.run_finetune_minedeath as ft
 
-RUN_ROOT = REPO_ROOT / "minefield_rl/logs/finetune_minedeath_run_20260425_180820"
+RUN_ROOT = REPO_ROOT / "minefield_rl/logs/grpo_rerun_20260426_141043/minedeath_fine_tune"
 GRPO_BEST = RUN_ROOT / "grpo/checkpoints/ppo_grpo_best.pt"
 
 OUT_PREFIX = REPO_ROOT / "minefield_rl/logs/l12_grpo_minedeath_render"

@@ -24,7 +24,7 @@ The whole stack is then walked through a curriculum (10×10 clustered → 10×10
 
 ![L12 GRPO 20×20 mine=death, every step](assets/l12_grpo_minedeath_20x20_every_step.gif)
 
-20×20 dispersed extreme (0.40 wall density, 0.30 mine density), `max_health = 1`. **Success rate 0.90 over 50 evaluation episodes** (death rate 0.06, average remaining health 0.94). One frame per environment step at 1 fps so every move and every mine in view is legible.
+20×20 dispersed extreme (0.40 wall density, 0.30 mine density), `max_health = 1`. **Success rate 0.90 over 50 evaluation episodes** (death rate 0.08, average remaining health 0.92). One frame per environment step at 1 fps so every move and every mine in view is legible.
 
 ## Architecture
 
