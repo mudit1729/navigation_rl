@@ -13,6 +13,11 @@ A single agent learns local-context navigation across nine progressively harder 
 
 Final L9 (Generalist + GRPO, 0.30-0.40 wall density mixed with 0.20-0.30 mine density) reaches 92-100% success per profile across L1 through L8. Reproduce with `python tools/run_progressive10.py` followed by `python tools/run_progressive10_extension.py`.
 
+### Dispersed-mode 20x20: every step shown
+![L13 PPO 20x20 every step](assets/l13_ppo_20x20_every_step.gif)
+
+The same agent, retrained through L10–L13 on a 20x20 grid with the new `dispersion: dispersed` map mode (walls and mines sampled uniformly at random, no cellular-automaton smoothing or flood-fill clustering). The 9x9 view is grid-size-agnostic, so the L9 GRPO weights from 10x10 transfer cleanly. One frame per environment step at 1 fps so you can read the local view between every move. Reproduce with `python tools/run_progressive20_dispersed.py` (warm-starts from the L9 GRPO checkpoint).
+
 ### Easy: 30x30
 ![30x30 Demo](assets/easy_30x30.gif)
 
@@ -32,6 +37,8 @@ Final L9 (Generalist + GRPO, 0.30-0.40 wall density mixed with 0.20-0.30 mine de
 - PPO-compatible MCTS-guided GRPO fine-tuning
 - Curriculum runner for `30x30 -> 50x50 -> 100x100`
 - Progressive 9-stage curriculum on a 10x10 grid that gradually densifies walls and mines and warm-starts each stage from the previous PPO best
+- Dispersed map mode (uniform-random walls and mines) for testing the policy on layouts without corridor or mine-cluster structure
+- Grid-size-agnostic policy: the same 9x9-view weights transfer from 10x10 training to 20x20 evaluation and fine-tuning
 - Pygame renderer with local-view panel plus persistent full-map preview
 - Rollout export to GIF and MP4
 

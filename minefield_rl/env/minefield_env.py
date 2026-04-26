@@ -48,11 +48,22 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
         max_steps: int | None = None,
         max_steps_factor: int = 5,
         generation_max_attempts: int = 10,
+        endpoint_clear_radius: int = 1,
+        blocked_fraction_target: float | None = None,
+        dispersion: str = "clustered",
         revisit_window: int = 10,
         reward_clip: tuple[float, float] = (-2.0, 2.0),
+        progress_scale: float = 0.1,
+        invalid_move_penalty: float = 0.05,
+        living_penalty: float = 0.005,
+        mine_hit_penalty: float = 1.0,
+        success_reward: float = 10.0,
+        death_penalty: float = 5.0,
+        timeout_penalty: float = 1.0,
         revisit_penalty: float = 0.03,
         loop_penalty: float = 0.08,
         oscillation_penalty: float = 0.12,
+        episode_profiles: list[dict[str, Any]] | None = None,
         seed: int | None = None,
     ) -> None:
         super().__init__()
@@ -60,14 +71,31 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
         self.view_radius = view_radius
         self.max_health = max_health
         self.max_steps_override = max_steps
+        self.base_max_steps_override = max_steps
         self.max_steps_factor = max_steps_factor
+        self.base_wall_density = wall_density
+        self.base_mine_density = mine_density
+        self.base_generation_max_attempts = generation_max_attempts
+        self.base_endpoint_clear_radius = endpoint_clear_radius
+        self.base_blocked_fraction_target = blocked_fraction_target
+        self.base_dispersion = dispersion
+        self.base_revisit_window = revisit_window
+        self.base_max_steps = int(max_steps if max_steps is not None else max_steps_factor * size * size)
         self.generation_max_attempts = generation_max_attempts
-        self.max_steps = int(max_steps if max_steps is not None else max_steps_factor * size * size)
+        self.max_steps = self.base_max_steps
         self.revisit_window = revisit_window
         self.reward_clip = reward_clip
+        self.progress_scale = progress_scale
+        self.invalid_move_penalty = invalid_move_penalty
+        self.living_penalty = living_penalty
+        self.mine_hit_penalty = mine_hit_penalty
+        self.success_reward = success_reward
+        self.death_penalty = death_penalty
+        self.timeout_penalty = timeout_penalty
         self.revisit_penalty = revisit_penalty
         self.loop_penalty = loop_penalty
         self.oscillation_penalty = oscillation_penalty
+        self.episode_profiles = [dict(profile) for profile in (episode_profiles or [])]
         self.base_seed = int(seed if seed is not None else np.random.SeedSequence().entropy)
 
         self.generator = MapGenerator(
@@ -75,6 +103,10 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
             wall_density=wall_density,
             mine_density=mine_density,
             max_attempts=generation_max_attempts,
+            endpoint_clear_radius=endpoint_clear_radius,
+            blocked_fraction_target=blocked_fraction_target,
+            path_max_health=max_health,
+            dispersion=dispersion,
         )
         window = 2 * view_radius + 1
         self.observation_space = spaces.Box(
@@ -119,11 +151,22 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
             max_steps=env_cfg.get("max_steps"),
             max_steps_factor=env_cfg.get("max_steps_factor", 5),
             generation_max_attempts=env_cfg.get("generation_max_attempts", 10),
+            endpoint_clear_radius=env_cfg.get("endpoint_clear_radius", 1),
+            blocked_fraction_target=env_cfg.get("blocked_fraction_target"),
+            dispersion=env_cfg.get("dispersion", "clustered"),
             revisit_window=env_cfg.get("revisit_window", 10),
             reward_clip=tuple(reward_cfg.get("clip", [-2.0, 2.0])),
+            progress_scale=reward_cfg.get("progress_scale", 0.1),
+            invalid_move_penalty=reward_cfg.get("invalid_move_penalty", 0.05),
+            living_penalty=reward_cfg.get("living_penalty", 0.005),
+            mine_hit_penalty=reward_cfg.get("mine_hit_penalty", 1.0),
+            success_reward=reward_cfg.get("success_reward", 10.0),
+            death_penalty=reward_cfg.get("death_penalty", 5.0),
+            timeout_penalty=reward_cfg.get("timeout_penalty", 1.0),
             revisit_penalty=reward_cfg.get("revisit_penalty", 0.03),
             loop_penalty=reward_cfg.get("loop_penalty", 0.08),
             oscillation_penalty=reward_cfg.get("oscillation_penalty", 0.12),
+            episode_profiles=env_cfg.get("episode_profiles"),
             seed=env_cfg.get("seed"),
         )
 
@@ -135,6 +178,7 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
         episode_seed = int(seed if seed is not None else self._rng.integers(0, 2**31 - 1))
         self.episode_seed = episode_seed
         episode_rng = np.random.default_rng(episode_seed)
+        active_profile = self._apply_episode_profile(episode_rng)
 
         spec = self.generator.generate(episode_rng, episode_seed)
         self.grid = spec.grid
@@ -158,8 +202,57 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
             "map_seed": self.episode_seed,
             "generation_attempts": spec.generation_attempts,
             "used_fallback_map": spec.used_fallback,
+            "profile_name": active_profile["name"],
+            "wall_density": active_profile["wall_density"],
+            "mine_density": active_profile["mine_density"],
+            "blocked_fraction_target": active_profile.get("blocked_fraction_target"),
+            "episode_max_steps": active_profile["max_steps"],
         }
         return self._get_observation(), self._get_info(RewardBreakdown())
+
+    def _apply_episode_profile(self, episode_rng: np.random.Generator) -> dict[str, Any]:
+        profile_name = "default"
+        wall_density = self.base_wall_density
+        mine_density = self.base_mine_density
+        generation_max_attempts = self.base_generation_max_attempts
+        blocked_fraction_target = self.base_blocked_fraction_target
+        dispersion = self.base_dispersion
+        revisit_window = self.base_revisit_window
+        max_steps = self.base_max_steps
+
+        if self.episode_profiles:
+            profile_index = int(episode_rng.integers(0, len(self.episode_profiles)))
+            profile = dict(self.episode_profiles[profile_index])
+            profile_name = str(profile.get("name", f"profile_{profile_index}"))
+            wall_density = float(profile.get("wall_density", wall_density))
+            mine_density = float(profile.get("mine_density", mine_density))
+            generation_max_attempts = int(profile.get("generation_max_attempts", generation_max_attempts))
+            blocked_fraction_target = profile.get("blocked_fraction_target", blocked_fraction_target)
+            dispersion = str(profile.get("dispersion", dispersion))
+            revisit_window = int(profile.get("revisit_window", revisit_window))
+            max_steps = int(profile.get("max_steps", max_steps))
+
+        self.generator.wall_density = wall_density
+        self.generator.mine_density = mine_density
+        self.generator.max_attempts = generation_max_attempts
+        self.generator.endpoint_clear_radius = self.base_endpoint_clear_radius
+        self.generator.blocked_fraction_target = blocked_fraction_target
+        self.generator.dispersion = dispersion
+        self.generator.path_max_health = self.max_health
+        self.generation_max_attempts = generation_max_attempts
+        self.revisit_window = revisit_window
+        self.max_steps = max_steps
+
+        return {
+            "name": profile_name,
+            "wall_density": wall_density,
+            "mine_density": mine_density,
+            "generation_max_attempts": generation_max_attempts,
+            "blocked_fraction_target": blocked_fraction_target,
+            "dispersion": dispersion,
+            "revisit_window": revisit_window,
+            "max_steps": max_steps,
+        }
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         if self.terminated or self.truncated:
@@ -180,13 +273,13 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
         if not self._is_valid_move(current_pos, next_pos):
             next_pos = current_pos
             invalid_move = True
-            reward.action -= 0.05
+            reward.action -= self.invalid_move_penalty
 
         self.agent_pos = next_pos
-        reward.progress += 0.1 * (self.prev_distance - self._distance(next_pos, self.exit_pos)) / self.size
+        reward.progress += self.progress_scale * (self.prev_distance - self._distance(next_pos, self.exit_pos)) / self.size
         self.prev_distance = self._distance(next_pos, self.exit_pos)
 
-        reward.action -= 0.005
+        reward.action -= self.living_penalty
         recent_positions = list(self.recent_positions)
         if next_pos in recent_positions:
             reward.action -= self.revisit_penalty
@@ -207,7 +300,7 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
             self.health -= 1
             self.mine_hits += 1
             mine_hit = True
-            reward.health -= 1.0
+            reward.health -= self.mine_hit_penalty
 
         self.recent_positions.append(next_pos)
         self.trajectory.append(next_pos)
@@ -216,15 +309,15 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
         if next_pos == self.exit_pos:
             self.terminated = True
             self.outcome = "success"
-            reward.terminal += 10.0
+            reward.terminal += self.success_reward
         elif self.health <= 0:
             self.terminated = True
             self.outcome = "death"
-            reward.terminal -= 5.0
+            reward.terminal -= self.death_penalty
         elif self.steps >= self.max_steps:
             self.truncated = True
             self.outcome = "timeout"
-            reward.terminal -= 1.0
+            reward.terminal -= self.timeout_penalty
 
         raw_reward = reward.total
         clipped_reward = float(np.clip(raw_reward, self.reward_clip[0], self.reward_clip[1]))
@@ -298,6 +391,11 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
             },
             "generation_attempts": self.info_cache.get("generation_attempts", 1),
             "used_fallback_map": self.info_cache.get("used_fallback_map", False),
+            "profile_name": self.info_cache.get("profile_name", "default"),
+            "wall_density": self.info_cache.get("wall_density", self.generator.wall_density),
+            "mine_density": self.info_cache.get("mine_density", self.generator.mine_density),
+            "blocked_fraction_target": self.info_cache.get("blocked_fraction_target", self.generator.blocked_fraction_target),
+            "episode_max_steps": self.info_cache.get("episode_max_steps", self.max_steps),
         }
         self.info_cache.update(info)
         return info
@@ -345,6 +443,10 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
             total_reward_clipped=float(self.total_reward_clipped),
             mine_hits=int(self.mine_hits),
             recent_positions=list(self.recent_positions),
+            revisit_window=int(self.revisit_window),
+            wall_density=float(self.generator.wall_density),
+            mine_density=float(self.generator.mine_density),
+            generation_max_attempts=int(self.generation_max_attempts),
             trajectory=list(self.trajectory),
             trajectory_counts=np.array(self.trajectory_counts, copy=True),
             outcome=self.outcome,
@@ -367,6 +469,11 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
         self.total_reward_raw = state.total_reward_raw
         self.total_reward_clipped = state.total_reward_clipped
         self.mine_hits = state.mine_hits
+        self.revisit_window = state.revisit_window
+        self.generation_max_attempts = state.generation_max_attempts
+        self.generator.wall_density = state.wall_density
+        self.generator.mine_density = state.mine_density
+        self.generator.max_attempts = state.generation_max_attempts
         self.recent_positions = deque(state.recent_positions, maxlen=self.revisit_window)
         self.trajectory = state.trajectory
         self.trajectory_counts = state.trajectory_counts
@@ -384,12 +491,22 @@ class MinefieldEnv(gym.Env[np.ndarray, int]):
             max_health=self.max_health,
             max_steps=self.max_steps_override,
             max_steps_factor=self.max_steps_factor,
-            generation_max_attempts=self.generation_max_attempts,
-            revisit_window=self.revisit_window,
+            generation_max_attempts=self.base_generation_max_attempts,
+            endpoint_clear_radius=self.base_endpoint_clear_radius,
+            dispersion=self.base_dispersion,
+            revisit_window=self.base_revisit_window,
             reward_clip=self.reward_clip,
+            progress_scale=self.progress_scale,
+            invalid_move_penalty=self.invalid_move_penalty,
+            living_penalty=self.living_penalty,
+            mine_hit_penalty=self.mine_hit_penalty,
+            success_reward=self.success_reward,
+            death_penalty=self.death_penalty,
+            timeout_penalty=self.timeout_penalty,
             revisit_penalty=self.revisit_penalty,
             loop_penalty=self.loop_penalty,
             oscillation_penalty=self.oscillation_penalty,
+            episode_profiles=self.episode_profiles,
             seed=self.base_seed,
         )
         env.restore(self.snapshot())

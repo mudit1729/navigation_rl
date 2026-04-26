@@ -25,11 +25,21 @@ class MapGenerator:
         wall_density: float = 0.15,
         mine_density: float = 0.12,
         max_attempts: int = 10,
+        endpoint_clear_radius: int = 1,
+        blocked_fraction_target: float | None = None,
+        path_max_health: int = 3,
+        dispersion: str = "clustered",
     ) -> None:
         self.size = size
         self.wall_density = wall_density
         self.mine_density = mine_density
         self.max_attempts = max_attempts
+        self.endpoint_clear_radius = max(0, int(endpoint_clear_radius))
+        self.blocked_fraction_target = None if blocked_fraction_target is None else float(blocked_fraction_target)
+        self.path_max_health = max(1, int(path_max_health))
+        if dispersion not in ("clustered", "dispersed"):
+            raise ValueError(f"dispersion must be 'clustered' or 'dispersed', got {dispersion!r}")
+        self.dispersion = dispersion
 
     def generate(self, rng: np.random.Generator, seed: int) -> MapSpec:
         for attempt in range(1, self.max_attempts + 1):
@@ -38,6 +48,10 @@ class MapGenerator:
             if start_pos == exit_pos:
                 continue
 
+            grid = np.array(grid, copy=True)
+            self._clear_endpoint_zone(grid, start_pos)
+            self._clear_endpoint_zone(grid, exit_pos)
+            self._adjust_blocked_fraction(grid, rng, start_pos, exit_pos)
             grid[start_pos] = CellType.START
             grid[exit_pos] = CellType.EXIT
 
@@ -64,12 +78,21 @@ class MapGenerator:
     def _generate_candidate(self, rng: np.random.Generator) -> np.ndarray:
         grid = np.full((self.size, self.size), CellType.EMPTY, dtype=np.int8)
 
-        wall_noise = rng.random((self.size, self.size)) < self.wall_density
-        grid[wall_noise] = CellType.WALL
-        grid = self._smooth_walls(grid, rng)
+        if self.dispersion == "dispersed":
+            wall_mask = rng.random((self.size, self.size)) < self.wall_density
+            grid[wall_mask] = CellType.WALL
+            non_wall = np.argwhere(grid != CellType.WALL)
+            mine_target = min(len(non_wall), int(round(self.size * self.size * self.mine_density)))
+            if mine_target > 0 and len(non_wall) > 0:
+                chosen = non_wall[rng.permutation(len(non_wall))[:mine_target]]
+                grid[chosen[:, 0], chosen[:, 1]] = CellType.MINE
+        else:
+            wall_noise = rng.random((self.size, self.size)) < self.wall_density
+            grid[wall_noise] = CellType.WALL
+            grid = self._smooth_walls(grid, rng)
 
-        mine_mask = self._grow_mines(rng)
-        grid[(grid != CellType.WALL) & mine_mask] = CellType.MINE
+            mine_mask = self._grow_mines(rng)
+            grid[(grid != CellType.WALL) & mine_mask] = CellType.MINE
 
         # Keep borders slightly more navigable.
         grid[0, :] = np.where(grid[0, :] == CellType.WALL, CellType.EMPTY, grid[0, :])
@@ -133,13 +156,13 @@ class MapGenerator:
             (row, col)
             for row in range(max(1, self.size // 2))
             for col in range(max(1, self.size // 2))
-            if grid[row, col] != CellType.WALL
+            if CellType(grid[row, col]) == CellType.EMPTY
         ]
         bottom_right = [
             (row, col)
             for row in range(self.size // 2, self.size)
             for col in range(self.size // 2, self.size)
-            if grid[row, col] != CellType.WALL
+            if CellType(grid[row, col]) == CellType.EMPTY
         ]
         if not top_left or not bottom_right:
             return (0, 0), (self.size - 1, self.size - 1)
@@ -147,14 +170,86 @@ class MapGenerator:
         exit_pos = bottom_right[int(rng.integers(0, len(bottom_right)))]
         return start_pos, exit_pos
 
+    def _clear_endpoint_zone(self, grid: np.ndarray, center: tuple[int, int]) -> None:
+        radius = self.endpoint_clear_radius
+        if radius <= 0:
+            return
+        row_center, col_center = center
+        for row in range(max(0, row_center - radius), min(self.size, row_center + radius + 1)):
+            for col in range(max(0, col_center - radius), min(self.size, col_center + radius + 1)):
+                grid[row, col] = CellType.EMPTY
+
+    def _adjust_blocked_fraction(
+        self,
+        grid: np.ndarray,
+        rng: np.random.Generator,
+        start_pos: tuple[int, int],
+        exit_pos: tuple[int, int],
+    ) -> None:
+        if self.blocked_fraction_target is None:
+            return
+
+        target_fraction = float(np.clip(self.blocked_fraction_target, 0.0, 1.0))
+        protected = self._endpoint_protection_mask(start_pos, exit_pos)
+        adjustable = ~protected
+        adjustable_count = int(adjustable.sum())
+        if adjustable_count <= 0:
+            return
+
+        target_blocked = min(int(round(target_fraction * grid.size)), adjustable_count)
+        blocked_mask = (grid == CellType.WALL) | (grid == CellType.MINE)
+        blocked_adjustable = blocked_mask & adjustable
+
+        total_density = max(self.wall_density + self.mine_density, 1e-8)
+        desired_wall_share = float(self.wall_density / total_density)
+        target_walls = int(round(target_blocked * desired_wall_share))
+        target_mines = target_blocked - target_walls
+
+        wall_positions = np.argwhere((grid == CellType.WALL) & adjustable)
+        mine_positions = np.argwhere((grid == CellType.MINE) & adjustable)
+
+        if len(wall_positions) > target_walls:
+            remove = wall_positions[rng.permutation(len(wall_positions))[: len(wall_positions) - target_walls]]
+            grid[remove[:, 0], remove[:, 1]] = CellType.EMPTY
+        if len(mine_positions) > target_mines:
+            remove = mine_positions[rng.permutation(len(mine_positions))[: len(mine_positions) - target_mines]]
+            grid[remove[:, 0], remove[:, 1]] = CellType.EMPTY
+
+        empty_positions = np.argwhere((grid == CellType.EMPTY) & adjustable)
+        current_walls = int(((grid == CellType.WALL) & adjustable).sum())
+        missing_walls = max(0, target_walls - current_walls)
+        if missing_walls > 0 and len(empty_positions) > 0:
+            chosen = empty_positions[rng.permutation(len(empty_positions))[:missing_walls]]
+            grid[chosen[:, 0], chosen[:, 1]] = CellType.WALL
+
+        empty_positions = np.argwhere((grid == CellType.EMPTY) & adjustable)
+        current_mines = int(((grid == CellType.MINE) & adjustable).sum())
+        missing_mines = max(0, target_mines - current_mines)
+        if missing_mines > 0 and len(empty_positions) > 0:
+            chosen = empty_positions[rng.permutation(len(empty_positions))[:missing_mines]]
+            grid[chosen[:, 0], chosen[:, 1]] = CellType.MINE
+
+    def _endpoint_protection_mask(
+        self,
+        start_pos: tuple[int, int],
+        exit_pos: tuple[int, int],
+    ) -> np.ndarray:
+        mask = np.zeros((self.size, self.size), dtype=bool)
+        for center in (start_pos, exit_pos):
+            row_center, col_center = center
+            for row in range(max(0, row_center - self.endpoint_clear_radius), min(self.size, row_center + self.endpoint_clear_radius + 1)):
+                for col in range(max(0, col_center - self.endpoint_clear_radius), min(self.size, col_center + self.endpoint_clear_radius + 1)):
+                    mask[row, col] = True
+        return mask
+
     def _has_safe_path(
         self, grid: np.ndarray, start_pos: tuple[int, int], exit_pos: tuple[int, int]
     ) -> bool:
-        queue: deque[tuple[int, int]] = deque([start_pos])
-        seen = {start_pos}
+        queue: deque[tuple[int, int, int]] = deque([(start_pos[0], start_pos[1], self.path_max_health)])
+        seen = {(start_pos[0], start_pos[1], self.path_max_health)}
 
         while queue:
-            row, col = queue.popleft()
+            row, col, health = queue.popleft()
             if (row, col) == exit_pos:
                 return True
             for d_row, d_col in (
@@ -171,15 +266,21 @@ class MapGenerator:
                 new_col = col + d_col
                 if not (0 <= new_row < self.size and 0 <= new_col < self.size):
                     continue
-                if (new_row, new_col) in seen:
-                    continue
                 cell = CellType(grid[new_row, new_col])
-                if cell in (CellType.WALL, CellType.MINE):
+                if cell == CellType.WALL:
                     continue
                 if d_row != 0 and d_col != 0 and self._diagonal_blocked(grid, row, col, d_row, d_col):
                     continue
-                seen.add((new_row, new_col))
-                queue.append((new_row, new_col))
+                next_health = health
+                if cell == CellType.MINE:
+                    if health <= 1:
+                        continue
+                    next_health = health - 1
+                state = (new_row, new_col, next_health)
+                if state in seen:
+                    continue
+                seen.add(state)
+                queue.append(state)
         return False
 
     def _diagonal_blocked(
@@ -223,6 +324,8 @@ class MapGenerator:
 
         start_pos = (1, 1)
         exit_pos = (self.size - 2, self.size - 2)
+        self._clear_endpoint_zone(grid, start_pos)
+        self._clear_endpoint_zone(grid, exit_pos)
         grid[start_pos] = CellType.START
         grid[exit_pos] = CellType.EXIT
         return grid, start_pos, exit_pos
