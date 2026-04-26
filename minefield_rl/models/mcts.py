@@ -23,6 +23,7 @@ class SearchNode:
     outcome: str | None
     reward_from_parent: float = 0.0
     priors: np.ndarray | None = None
+    valid_actions: np.ndarray | None = None
     children: dict[int, "SearchNode"] = field(default_factory=dict)
     visit_count: int = 0
     action_visits: np.ndarray = field(default_factory=lambda: np.zeros(8, dtype=np.float32))
@@ -48,6 +49,11 @@ class SearchResult:
     mcts_action: int
     simulations: int
     root_priors: np.ndarray
+    # Distribution chosen_action was actually sampled from. In training this is
+    # the temperature-softened visit-count policy; in eval it is one-hot on
+    # argmax(visit_counts). Use this — not `policy` — when computing the
+    # importance-sampling denominator for off-policy / PPO ratios.
+    behavior_policy: np.ndarray
 
 
 class AlphaZeroMCTS:
@@ -71,6 +77,7 @@ class AlphaZeroMCTS:
         hidden_in: np.ndarray | None = None,
         simulations: int | None = None,
         training: bool = False,
+        add_root_noise: bool | None = None,
     ) -> SearchResult:
         simulation_budget = int(
             simulations
@@ -82,6 +89,7 @@ class AlphaZeroMCTS:
             health / env.max_health,
             hidden_in,
         )
+        root_valid_actions = self._valid_action_mask_from_env(env)
         root = SearchNode(
             snapshot=env.snapshot(),
             observation=np.array(observation, copy=True),
@@ -91,8 +99,12 @@ class AlphaZeroMCTS:
             state_value=root_value,
             terminal=False,
             outcome=None,
+            valid_actions=root_valid_actions,
         )
-        self._expand(root, add_dirichlet_noise=training)
+        self._expand(
+            root,
+            add_dirichlet_noise=training if add_root_noise is None else add_root_noise,
+        )
 
         for _ in range(simulation_budget):
             self._simulate(root)
@@ -107,8 +119,12 @@ class AlphaZeroMCTS:
             tempered = np.power(policy + 1e-8, 1.0 / max(self.policy_temperature, 1e-6))
             tempered /= tempered.sum()
             chosen_action = int(np.random.choice(len(tempered), p=tempered))
+            behavior_policy = tempered.astype(np.float32)
         else:
-            chosen_action = int(np.argmax(visit_counts if visit_counts.sum() > 0 else root.priors))
+            argmax_target = visit_counts if visit_counts.sum() > 0 else root.priors
+            chosen_action = int(np.argmax(argmax_target))
+            behavior_policy = np.zeros_like(policy, dtype=np.float32)
+            behavior_policy[chosen_action] = 1.0
 
         return SearchResult(
             policy=policy,
@@ -121,6 +137,7 @@ class AlphaZeroMCTS:
             mcts_action=chosen_action,
             simulations=simulation_budget,
             root_priors=np.array(root.priors, copy=True),
+            behavior_policy=behavior_policy,
         )
 
     def _simulate(self, root: SearchNode) -> None:
@@ -152,18 +169,26 @@ class AlphaZeroMCTS:
             parent.action_value_sums[action] += value
 
     def _select_action(self, node: SearchNode) -> int:
-        priors = node.priors if node.priors is not None else self._policy_from_q(node.q_values)
+        priors = node.priors if node.priors is not None else self._policy_from_q(node.q_values, node.valid_actions)
         q_values = node.mean_action_values()
+        if node.valid_actions is not None:
+            q_values = np.where(node.valid_actions > 0.0, q_values, -1e9)
         sqrt_visits = np.sqrt(max(node.visit_count, 1))
         exploration = self.c_puct * priors * sqrt_visits / (1.0 + node.action_visits)
         scores = q_values + exploration
         return int(np.argmax(scores))
 
     def _expand(self, node: SearchNode, add_dirichlet_noise: bool) -> None:
-        priors = self._policy_from_q(node.q_values)
+        if node.valid_actions is None:
+            node.valid_actions = self._valid_action_mask_from_snapshot(node.snapshot)
+        priors = self._policy_from_q(node.q_values, node.valid_actions)
         if add_dirichlet_noise:
-            noise = np.random.dirichlet([self.dirichlet_alpha] * len(priors))
-            priors = (1.0 - self.dirichlet_epsilon) * priors + self.dirichlet_epsilon * noise
+            valid_indices = np.flatnonzero(node.valid_actions > 0.0)
+            if len(valid_indices) > 0:
+                noise = np.zeros_like(priors)
+                noise_values = np.random.dirichlet([self.dirichlet_alpha] * len(valid_indices))
+                noise[valid_indices] = noise_values
+                priors = (1.0 - self.dirichlet_epsilon) * priors + self.dirichlet_epsilon * noise
         node.priors = priors.astype(np.float32)
 
     def _expand_child(self, parent: SearchNode, action: int) -> tuple[SearchNode, float]:
@@ -181,6 +206,7 @@ class AlphaZeroMCTS:
                 terminal=True,
                 outcome=info.get("outcome"),
                 reward_from_parent=float(reward),
+                valid_actions=np.zeros_like(parent.q_values, dtype=np.float32),
             )
         else:
             child_q, child_value, child_hidden = self._evaluate_state(
@@ -198,6 +224,7 @@ class AlphaZeroMCTS:
                 terminal=False,
                 outcome=None,
                 reward_from_parent=float(reward),
+                valid_actions=self._valid_action_mask_from_env(sim_env),
             )
         return child, float(reward)
 
@@ -206,10 +233,16 @@ class AlphaZeroMCTS:
             return float(node.state_value)
         return float(node.state_value)
 
-    def _policy_from_q(self, q_values: np.ndarray) -> np.ndarray:
-        scaled = q_values / max(self.policy_temperature, 1e-6)
-        scaled -= np.max(scaled)
-        exp_values = np.exp(scaled)
+    def _policy_from_q(self, q_values: np.ndarray, valid_actions: np.ndarray | None = None) -> np.ndarray:
+        scaled = np.array(q_values, copy=True, dtype=np.float32) / max(self.policy_temperature, 1e-6)
+        if valid_actions is None:
+            valid_actions = np.ones_like(scaled, dtype=np.float32)
+        valid_mask = valid_actions > 0.0
+        if not np.any(valid_mask):
+            return np.full_like(scaled, 1.0 / max(len(scaled), 1), dtype=np.float32)
+        scaled = np.where(valid_mask, scaled, -1e9)
+        scaled -= np.max(scaled[valid_mask])
+        exp_values = np.exp(scaled) * valid_mask.astype(np.float32)
         return exp_values / np.clip(exp_values.sum(), 1e-8, None)
 
     def _terminal_value(self, outcome: str | None) -> float:
@@ -252,3 +285,40 @@ class AlphaZeroMCTS:
                 value = float(output.values[0].detach().cpu().item())
                 hidden = output.hidden.detach().cpu().numpy().astype(np.float32)
         return q_values, value, hidden
+
+    def _valid_action_mask_from_env(self, env: MinefieldEnv) -> np.ndarray:
+        mask = np.zeros(self.model.action_dim, dtype=np.float32)
+        current_pos = env.agent_pos
+        for action in range(self.model.action_dim):
+            next_pos = env._candidate_position(current_pos, action)
+            mask[action] = 1.0 if env._is_valid_move(current_pos, next_pos) else 0.0
+        return mask
+
+    def _valid_action_mask_from_snapshot(self, snapshot: Any) -> np.ndarray:
+        mask = np.zeros(self.model.action_dim, dtype=np.float32)
+        current_row, current_col = snapshot.agent_pos
+        size = snapshot.grid.shape[0]
+        for action, (d_row, d_col) in enumerate(
+            [(-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1)]
+        ):
+            next_row = current_row + int(d_row)
+            next_col = current_col + int(d_col)
+            if not (0 <= next_row < size and 0 <= next_col < size):
+                continue
+            if int(snapshot.grid[next_row, next_col]) == int(1):
+                continue
+            if d_row != 0 and d_col != 0:
+                side_a = (current_row + int(d_row), current_col)
+                side_b = (current_row, current_col + int(d_col))
+                blocked = False
+                for row, col in (side_a, side_b):
+                    if not (0 <= row < size and 0 <= col < size):
+                        blocked = True
+                        break
+                    if int(snapshot.grid[row, col]) == int(1):
+                        blocked = True
+                        break
+                if blocked:
+                    continue
+            mask[action] = 1.0
+        return mask
